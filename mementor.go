@@ -15,21 +15,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"io"
+	"path/filepath"
 	"flag"
-	"io/ioutil"
 	"encoding/json"
-	"log"
 	"time"
 	"errors"
 	"strconv"
 	"math/rand"
 	"text/tabwriter"
 )
-
-// TODO remove these silencer when going into production!
-var _ = ioutil.Discard
-var _ = time.Now()
-var _ = log.Ltime
 
 type Memento struct {
 	Msg      string
@@ -58,13 +53,21 @@ func init() {
 	flag.Parse()
 	handles = make(map[string]*os.File)
 
+	// create file if it does not exist
+	if _, err := os.Stat(dataFile); os.IsNotExist(err) {
+		fmt.Printf("%s will be created\n", dataFile)
+		_, err = createFile()
+		if err != nil {
+			panic("Failed to create data file: " + dataFile)
+		}
+	}
+
 }
 
 func main() {
 
 	var err error
 
-	// TODO create file if it dows not exist
 	defer func() {
 		// close all open files
 		for key, writer := range handles {
@@ -154,10 +157,10 @@ func fetch() (err error) {
 		return err
 	}
 	if len(mementos) < 1 {
-		n = 0
+		return
 	} else {
 		rand.Seed(time.Now().Unix())
-		n = rand.Intn(len(mementos) - 1)
+		n = rand.Intn(len(mementos))
 	}
 	fmt.Println(mementos[n].Msg)
 	return
@@ -224,7 +227,7 @@ func readMementos() (mementos []Memento, err error) {
 	}
 	dec := json.NewDecoder(file)
 	err = dec.Decode(&mementos)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 	return mementos, nil
@@ -233,8 +236,8 @@ func readMementos() (mementos []Memento, err error) {
 // write mementos into the file as a JSON string
 func writeMementos(mementos []Memento) (err error) {
 	var file *os.File
-	// truncates the file
-	file, err = os.Create(dataFile)
+	// truncate the file
+	file, err = createFile()
 	if err != nil {
 		return err
 	}
@@ -246,6 +249,24 @@ func writeMementos(mementos []Memento) (err error) {
 	written, err := file.Write(s)
 	fmt.Printf("%d bytes written\n", written)
 	return
+}
+
+// create empty file or truncates an existing file
+func createFile() (file *os.File, err error) {
+	// create directory if necessary
+	dir := filepath.Dir(dataFile)
+	if _, err = os.Stat(dir); err != nil {
+		fmt.Printf("Creating directory %s\n", dir)
+		err = os.MkdirAll(dir, os.ModeDir | 0700)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to create directory for the data file at %s.\n%s", dir, err)
+		}
+	}
+	file, err = os.Create(dataFile)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
 }
 
 // get file handle for reading mementos
