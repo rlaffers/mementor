@@ -1,7 +1,7 @@
 mementor
 ========
 
-Simple reminder program to display messages from a stored list.
+Simple tool to display messages from a stored list.
 
 Use cases:
 
