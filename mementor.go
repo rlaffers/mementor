@@ -111,12 +111,14 @@ func main() {
 }
 
 // print help screen
-func help() {
+   func help() {
 	usage := `
 Usage: mementor [OPTIONS...] ACTION [arguments...]
 
 ACTIONS
 	add		Add new memento.
+
+	fetch	Display a random memento.
 
 	rm		Remove a memento.
 
