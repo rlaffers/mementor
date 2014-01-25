@@ -6,24 +6,24 @@
  *
  *
  * @author Richard Laffers <rlaffers@gmail.com
- * @copyright Richard Laffers <rlaffers@gmail.com, 
+ * @copyright Richard Laffers <rlaffers@gmail.com,
  * @package default
  * @version $Id$
  */
 package main
 
 import (
-	"fmt"
-	"os"
-	"io"
-	"path/filepath"
-	"flag"
 	"encoding/json"
-	"time"
 	"errors"
-	"strconv"
+	"flag"
+	"fmt"
+	"io"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"strconv"
 	"text/tabwriter"
+	"time"
 )
 
 type Memento struct {
@@ -32,15 +32,14 @@ type Memento struct {
 	Priority int8
 }
 
-
 const (
 	VERSION = "0.1.0"
 	HOME
 )
 
 var (
-	dataFile	string
-	handles    map[string]*os.File
+	dataFile string
+	handles  map[string]*os.File
 )
 
 func init() {
@@ -49,7 +48,7 @@ func init() {
 		panic("HOME environment variable is undefined")
 	}
 	// parse flags
-	flag.StringVar(&dataFile, "f", HOME + "/.mementor/mementos.json", "Path to mementos storage file")
+	flag.StringVar(&dataFile, "f", HOME+"/.mementor/mementos.json", "Path to mementos storage file")
 	flag.Parse()
 	handles = make(map[string]*os.File)
 
@@ -111,7 +110,7 @@ func main() {
 }
 
 // print help screen
-   func help() {
+func help() {
 	usage := `
 Usage: mementor [OPTIONS...] ACTION [arguments...]
 
@@ -133,7 +132,6 @@ OPTIONS
 `
 	fmt.Println(usage)
 }
-
 
 // list all mementos
 func list() (err error) {
@@ -172,15 +170,15 @@ func fetch() (err error) {
 func add() (err error) {
 	var (
 		memento Memento
-		args	[]string
+		args    []string
 	)
 	args = flag.Args()
 	if len(args) < 2 {
 		return errors.New("Please specify the message.")
 	}
 	memento = Memento{
-		Msg: args[1],
-		Time: time.Now().Unix(),
+		Msg:      args[1],
+		Time:     time.Now().Unix(),
 		Priority: 1}
 	mementos, err := readMementos()
 	if err != nil {
@@ -195,7 +193,7 @@ func add() (err error) {
 func rm() (err error) {
 	var (
 		mementos []Memento
-		args	 []string = flag.Args()
+		args     []string = flag.Args()
 	)
 	if len(args) < 2 {
 		return errors.New("Please specify memento number.")
@@ -211,7 +209,7 @@ func rm() (err error) {
 		return err
 	}
 	// remove the Nth memento
-	if n > int64(len(mementos) - 1) {
+	if n > int64(len(mementos)-1) {
 		return fmt.Errorf("Memento %d does not exist.", n)
 	}
 	before := mementos[:n]
@@ -259,7 +257,7 @@ func createFile() (file *os.File, err error) {
 	dir := filepath.Dir(dataFile)
 	if _, err = os.Stat(dir); err != nil {
 		fmt.Printf("Creating directory %s\n", dir)
-		err = os.MkdirAll(dir, os.ModeDir | 0700)
+		err = os.MkdirAll(dir, os.ModeDir|0700)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to create directory for the data file at %s.\n%s", dir, err)
 		}
