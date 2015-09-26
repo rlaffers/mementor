@@ -17,14 +17,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/Sirupsen/logrus"
-	"github.com/xeonx/timeago"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/Sirupsen/logrus"
+	"github.com/xeonx/timeago"
 )
 
 // Memento represents a record in mementor.
@@ -43,11 +46,11 @@ type print struct {
 }
 
 func (p *print) info(msg string, args ...interface{}) {
-	fmt.Printf("\x1b[36;1m"+msg+"\n\x1b[39;49m", args...)
+	fmt.Printf("\x1b[36;1m"+msg+"\n\x1b[0m", args...)
 }
 
 func (p *print) error(msg string, args ...interface{}) {
-	fmt.Printf("\x1b[31;1m"+msg+"\n\x1b[39;49m", args...)
+	fmt.Printf("\x1b[31;1m"+msg+"\n\x1b[0m", args...)
 }
 
 func (p *print) underscore(msg string, args ...interface{}) {
@@ -187,57 +190,75 @@ func fetch() (err error) {
 	return
 }
 
+// TODO modify
+
 // add a new memento to the stack
 func add() (err error) {
-	var (
-		memento Memento
-		args    []string
-	)
-	args = flag.Args()
+	var args []string = flag.Args()
 	if len(args) < 2 {
 		return errors.New("Please specify the message.")
 	}
-	memento = Memento{
-		Msg:      args[1],
-		Time:     time.Now().Unix(),
-		Priority: 1}
+	// concat the remaining arguments as a message string
+	msg := strings.Join(args[1:], " ")
 	mementos, err := readMementos()
+	var lastId int
+	if len(mementos) < 1 {
+		lastId = 0
+	} else {
+		lastMemento := mementos[len(mementos)-1]
+		lastId = lastMemento.Id
+	}
+	m := Memento{
+		Id:       lastId + 1,
+		Msg:      msg,
+		Time:     time.Now().Unix(),
+		Priority: 1,
+	}
+	logger.Debugf("Writing %+v", m)
 	if err != nil {
 		return err
 	}
-	mementos = append(mementos, &memento)
+	mementos = append(mementos, &m)
 	err = writeMementos(mementos)
 	return err
 }
 
 // remove a memento from the stack
-func rm() (err error) {
+func rm() error {
 	var (
-		mementos []*Memento
-		args     []string = flag.Args()
+		args []string = flag.Args()
 	)
 	if len(args) < 2 {
-		return errors.New("Please specify memento number.")
+		return errors.New("Please specify a memento ID.")
 	}
-	n, err := strconv.ParseInt(args[1], 10, 0)
-	if err != nil || n < 0 {
-		return errors.New("Invalid memento number: " + args[1])
+	id64, err := strconv.ParseInt(args[1], 10, 0)
+	if err != nil || id64 < 0 {
+		return fmt.Errorf("Invalid memento Id: %v", args[1])
 	}
+	id := int(id64)
 
 	// read all mementos
-	mementos, err = readMementos()
+	mementos, err := readMementos()
 	if err != nil {
 		return err
 	}
-	// remove the Nth memento
-	if n > int64(len(mementos)-1) {
-		return fmt.Errorf("Memento %d does not exist.", n)
+	// do a binary search for the memento. It should be sorted in ascending order
+	count := len(mementos)
+	n := sort.Search(count, func(i int) bool {
+		return mementos[i].Id >= id
+	})
+	if n < count && mementos[n].Id == id {
+		pr.info("found memento at %d", n)
+	} else {
+		// not found
+		return fmt.Errorf("Memento %d does not exist", id)
 	}
+
 	before := mementos[:n]
 	after := mementos[n+1:]
 	mementos = append(before, after...)
 	writeMementos(mementos)
-	return
+	return nil
 }
 
 // return parsed mementos from the passed file
