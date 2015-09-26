@@ -17,65 +17,88 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Sirupsen/logrus"
+	"github.com/xeonx/timeago"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
-	"text/tabwriter"
 	"time"
 )
 
+// Memento represents a record in mementor.
 type Memento struct {
+	Id       int
 	Msg      string
 	Time     int64
 	Priority int8
 }
 
 const (
-	VERSION = "0.1.2"
-	HOME
+	version = "0.1.3"
 )
 
+type print struct {
+}
+
+func (p *print) info(msg string, args ...interface{}) {
+	fmt.Printf("\x1b[36;1m"+msg+"\n\x1b[39;49m", args...)
+}
+
+func (p *print) error(msg string, args ...interface{}) {
+	fmt.Printf("\x1b[31;1m"+msg+"\n\x1b[39;49m", args...)
+}
+
+func (p *print) underscore(msg string, args ...interface{}) {
+	fmt.Printf("\x1b[4;1m"+msg+"\n\x1b[0m", args...)
+}
+
 var (
-	dataFile string
-	handles  map[string]*os.File
+	dataFile *string
+	debug    = flag.Bool("debug", false, "Turn debugging on.")
+	logger   *logrus.Logger
+	pr       = print{}
 )
 
 func init() {
-	HOME := os.Getenv("HOME")
-	if len(HOME) < 1 {
-		panic("HOME environment variable is undefined")
+	home := os.Getenv("HOME")
+	if home == "" {
+		panic("HOME variable is not set")
 	}
-	// parse flags
-	flag.StringVar(&dataFile, "f", HOME+"/.mementor/mementos.json", "Path to mementos storage file")
-	flag.Parse()
-	handles = make(map[string]*os.File)
 
-	// create file if it does not exist
-	if _, err := os.Stat(dataFile); os.IsNotExist(err) {
-		fmt.Printf("%s will be created\n", dataFile)
-		_, err = createFile()
-		if err != nil {
-			panic("Failed to create data file: " + dataFile)
+	dataFile = flag.String("f", home+"/.mementor/mementos.json", "Path to the mementos storage file.")
+	// parse flags
+	flag.Parse()
+	logger = logrus.New()
+	if *debug {
+		logger.Level = logrus.DebugLevel
+	} else {
+		logger.Level = logrus.InfoLevel
+	}
+	formatter := new(logrus.TextFormatter)
+	//formatter.FullTimestamp = true
+	//formatter.TimestampFormat = "2006-01-02 15:04:05.000"
+	logger.Formatter = formatter
+
+	// create the mementos file if it does not exist
+	// TODO presunut do createorappend
+	if _, err := os.Stat(*dataFile); err != nil {
+		if os.IsNotExist(err) {
+			_, err = createFile()
+			if err != nil {
+				panic("Failed to create data file: " + *dataFile)
+			}
+			pr.info("%s was be created", *dataFile)
+
+		} else {
+			panic(err)
 		}
 	}
 
 }
 
 func main() {
-
-	var err error
-
-	defer func() {
-		// close all open files
-		for key, writer := range handles {
-			//fmt.Printf("Closing %s handle\n", key)
-			writer.Close()
-			delete(handles, key)
-		}
-	}()
-
 	args := flag.Args()
 
 	var command string
@@ -84,6 +107,7 @@ func main() {
 	} else {
 		command = "fetch"
 	}
+	var err error
 	switch command {
 	case "add":
 		err = add()
@@ -94,16 +118,15 @@ func main() {
 	case "list", "ls":
 		err = list()
 	case "version":
-		fmt.Println(VERSION)
+		fmt.Println(version)
 	case "help":
 		help()
 	default:
-		fmt.Printf("Action `%s` is invalid\n", command)
+		pr.error("Action `%s` is invalid", command)
 		help()
 	}
-
 	if err != nil {
-		fmt.Println(err)
+		pr.error(err.Error())
 	}
 
 	return
@@ -115,38 +138,36 @@ func help() {
 Usage: mementor [OPTIONS...] ACTION [arguments...]
 
 ACTIONS
-	add		Add new memento.
-
-	fetch	Display a random memento.
-
-	rm		Remove a memento.
-
+	add			Add new memento.
+	fetch		Display a random memento.
+	rm			Remove a memento.
 	help		Display this help.
-
 	list		List all mementos.
-
 	version		Display the current version.
 
 OPTIONS
-	-f			Path to the mementos storage file. Defaults to "$HOME/.mementor/mementos.json"
 `
-	fmt.Println(usage)
+	fmt.Print(usage)
+	flag.PrintDefaults()
 }
 
 // list all mementos
-func list() (err error) {
+func list() error {
 	mementos, err := readMementos()
-
-	w := new(tabwriter.Writer)
-	w.Init(os.Stdout, 5, 0, 1, ' ', 0)
-	var formattedTime string
-	for i, item := range mementos {
-		formattedTime = time.Unix(item.Time, 0).Format("Jan 2 2006 15:04:05")
-		fmt.Fprintf(w, "%d\t%s\t[%s]\n", i, item.Msg, formattedTime)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(w, "--\n%d mementos shown.\n", len(mementos))
-	w.Flush()
-	return
+
+	pr.underscore(" ID   Age          Description")
+	cfg := timeago.NoMax(timeago.English)
+	cfg.PastSuffix = ""
+	for _, m := range mementos {
+		t := time.Unix(m.Time, 0)
+		fmt.Printf("%3d   %10s   %s\n", m.Id, cfg.Format(t), m.Msg)
+	}
+
+	pr.info("\n%d mementos total.\n", len(mementos))
+	return nil
 }
 
 // print a single random memento message
@@ -184,7 +205,7 @@ func add() (err error) {
 	if err != nil {
 		return err
 	}
-	mementos = append(mementos, memento)
+	mementos = append(mementos, &memento)
 	err = writeMementos(mementos)
 	return err
 }
@@ -192,7 +213,7 @@ func add() (err error) {
 // remove a memento from the stack
 func rm() (err error) {
 	var (
-		mementos []Memento
+		mementos []*Memento
 		args     []string = flag.Args()
 	)
 	if len(args) < 2 {
@@ -220,21 +241,23 @@ func rm() (err error) {
 }
 
 // return parsed mementos from the passed file
-func readMementos() (mementos []Memento, err error) {
-	file, err := getFileReader()
+//func readMementos() ([]*Memento, error) {
+func readMementos() ([]*Memento, error) {
+	logger.Debugf("opening %s", *dataFile)
+	r, err := os.Open(*dataFile)
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(file)
-	err = dec.Decode(&mementos)
-	if err != nil && err != io.EOF {
+	dec := json.NewDecoder(r)
+	var mementos []*Memento
+	if err := dec.Decode(&mementos); err != nil && err != io.EOF {
 		return nil, err
 	}
 	return mementos, nil
 }
 
 // write mementos into the file as a JSON string
-func writeMementos(mementos []Memento) (err error) {
+func writeMementos(mementos []*Memento) (err error) {
 	var file *os.File
 	// truncate the file
 	file, err = createFile()
@@ -254,7 +277,7 @@ func writeMementos(mementos []Memento) (err error) {
 // create empty file or truncates an existing file
 func createFile() (file *os.File, err error) {
 	// create directory if necessary
-	dir := filepath.Dir(dataFile)
+	dir := filepath.Dir(*dataFile)
 	if _, err = os.Stat(dir); err != nil {
 		fmt.Printf("Creating directory %s\n", dir)
 		err = os.MkdirAll(dir, os.ModeDir|0700)
@@ -262,23 +285,9 @@ func createFile() (file *os.File, err error) {
 			return nil, fmt.Errorf("Failed to create directory for the data file at %s.\n%s", dir, err)
 		}
 	}
-	file, err = os.Create(dataFile)
+	file, err = os.Create(*dataFile)
 	if err != nil {
 		return nil, err
 	}
 	return file, nil
-}
-
-// get file handle for reading mementos
-func getFileReader() (r *os.File, err error) {
-	var ok bool
-	if r, ok = handles["read"]; ok {
-		return r, nil
-	}
-	r, err = os.Open(dataFile)
-	if err == nil {
-		handles["read"] = r
-		return r, nil
-	}
-	return nil, err
 }
