@@ -21,61 +21,87 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
-	"text/tabwriter"
+	"strings"
 	"time"
+
+	"github.com/Sirupsen/logrus"
+	"github.com/xeonx/timeago"
 )
 
+// Memento represents a record in mementor.
 type Memento struct {
+	Id       int
 	Msg      string
 	Time     int64
-	Priority int8
+	Priority int
 }
 
 const (
-	VERSION = "0.1.2"
-	HOME
+	version = "0.2.0"
 )
 
+type print struct {
+}
+
+func (p *print) info(msg string, args ...interface{}) {
+	fmt.Printf("\x1b[36;1m"+msg+"\n\x1b[0m", args...)
+}
+
+func (p *print) error(msg string, args ...interface{}) {
+	fmt.Printf("\x1b[31;1m"+msg+"\n\x1b[0m", args...)
+}
+
+func (p *print) underscore(msg string, args ...interface{}) {
+	fmt.Printf("\x1b[4;1m"+msg+"\n\x1b[0m", args...)
+}
+
 var (
-	dataFile string
-	handles  map[string]*os.File
+	dataFile *string
+	debug    = flag.Bool("debug", false, "Turn debugging on.")
+	logger   *logrus.Logger
+	pr       = print{}
 )
 
 func init() {
-	HOME := os.Getenv("HOME")
-	if len(HOME) < 1 {
-		panic("HOME environment variable is undefined")
+	home := os.Getenv("HOME")
+	if home == "" {
+		panic("HOME variable is not set")
 	}
-	// parse flags
-	flag.StringVar(&dataFile, "f", HOME+"/.mementor/mementos.json", "Path to mementos storage file")
-	flag.Parse()
-	handles = make(map[string]*os.File)
 
-	// create file if it does not exist
-	if _, err := os.Stat(dataFile); os.IsNotExist(err) {
-		fmt.Printf("%s will be created\n", dataFile)
-		_, err = createFile()
-		if err != nil {
-			panic("Failed to create data file: " + dataFile)
+	dataFile = flag.String("f", home+"/.mementor/mementos.json", "Path to the mementos storage file.")
+	// parse flags
+	flag.Parse()
+	logger = logrus.New()
+	if *debug {
+		logger.Level = logrus.DebugLevel
+	} else {
+		logger.Level = logrus.InfoLevel
+	}
+	formatter := new(logrus.TextFormatter)
+	//formatter.FullTimestamp = true
+	//formatter.TimestampFormat = "2006-01-02 15:04:05.000"
+	logger.Formatter = formatter
+
+	// create the mementos file if it does not exist
+	if _, err := os.Stat(*dataFile); err != nil {
+		if os.IsNotExist(err) {
+			_, err = createFile()
+			if err != nil {
+				panic("Failed to create data file: " + *dataFile)
+			}
+			pr.info("%s was be created", *dataFile)
+
+		} else {
+			panic(err)
 		}
 	}
 
 }
 
 func main() {
-
-	var err error
-
-	defer func() {
-		// close all open files
-		for key, writer := range handles {
-			//fmt.Printf("Closing %s handle\n", key)
-			writer.Close()
-			delete(handles, key)
-		}
-	}()
-
 	args := flag.Args()
 
 	var command string
@@ -84,26 +110,28 @@ func main() {
 	} else {
 		command = "fetch"
 	}
+	var err error
 	switch command {
 	case "add":
 		err = add()
 	case "fetch":
 		fetch()
 	case "rm", "del":
-		err = rm()
+		err = remove()
+	case "modify", "mod":
+		err = modify()
 	case "list", "ls":
 		err = list()
 	case "version":
-		fmt.Println(VERSION)
+		fmt.Println(version)
 	case "help":
 		help()
 	default:
-		fmt.Printf("Action `%s` is invalid\n", command)
+		pr.error("Action `%s` is invalid", command)
 		help()
 	}
-
 	if err != nil {
-		fmt.Println(err)
+		pr.error(err.Error())
 	}
 
 	return
@@ -116,40 +144,41 @@ Usage: mementor [OPTIONS...] ACTION [arguments...]
 
 ACTIONS
 	add		Add new memento.
-
-	fetch	Display a random memento.
-
+	fetch		Display a random memento.
+	modify		Modify an existing memento.
 	rm		Remove a memento.
-
 	help		Display this help.
-
 	list		List all mementos.
-
 	version		Display the current version.
 
 OPTIONS
-	-f			Path to the mementos storage file. Defaults to "$HOME/.mementor/mementos.json"
 `
-	fmt.Println(usage)
+	fmt.Print(usage)
+	flag.PrintDefaults()
 }
 
 // list all mementos
-func list() (err error) {
+// TODO color lines according to their priority
+func list() error {
 	mementos, err := readMementos()
-
-	w := new(tabwriter.Writer)
-	w.Init(os.Stdout, 5, 0, 1, ' ', 0)
-	var formattedTime string
-	for i, item := range mementos {
-		formattedTime = time.Unix(item.Time, 0).Format("Jan 2 2006 15:04:05")
-		fmt.Fprintf(w, "%d\t%s\t[%s]\n", i, item.Msg, formattedTime)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(w, "--\n%d mementos shown.\n", len(mementos))
-	w.Flush()
-	return
+
+	pr.underscore(" ID   Age         Pri  Description")
+	cfg := timeago.NoMax(timeago.English)
+	cfg.PastSuffix = ""
+	for _, m := range mementos {
+		t := time.Unix(m.Time, 0)
+		fmt.Printf("%3d   %10s  %3d  %s\n", m.Id, cfg.Format(t), m.Priority, m.Msg)
+	}
+
+	pr.info("\n%d mementos total.\n", len(mementos))
+	return nil
 }
 
 // print a single random memento message
+// TODO higher priority items should be fetched more often
 func fetch() (err error) {
 	var n int
 	mementos, err := readMementos()
@@ -166,75 +195,134 @@ func fetch() (err error) {
 	return
 }
 
-// add a new memento to the stack
-func add() (err error) {
-	var (
-		memento Memento
-		args    []string
-	)
-	args = flag.Args()
-	if len(args) < 2 {
-		return errors.New("Please specify the message.")
+// modifies an existing memento
+// Example:
+// mementor mod 123 priority:3
+func modify() error {
+	var args []string = flag.Args()
+	if len(args) < 3 {
+		return errors.New("Not enough arguments")
 	}
-	memento = Memento{
-		Msg:      args[1],
-		Time:     time.Now().Unix(),
-		Priority: 1}
+	id, err := parseId()
+	if err != nil {
+		return err
+	}
+	// read all mementos
 	mementos, err := readMementos()
 	if err != nil {
 		return err
 	}
-	mementos = append(mementos, memento)
+	n, ok := findMementoById(mementos, id)
+	if !ok {
+		return fmt.Errorf("Memento %d does not exist", id)
+	}
+	logger.Debugf("found memento at %d", n)
+	m := mementos[n]
+	mod := strings.Split(args[2], ":")
+	if len(mod) < 2 {
+		return fmt.Errorf("Your modification must be in the form of property:value")
+	}
+
+	rePriority := regexp.MustCompile("^pri.*")
+	reMsg := regexp.MustCompile("^m.*")
+	switch {
+	case rePriority.MatchString(mod[0]):
+		value, err := strconv.ParseInt(mod[1], 10, 0)
+		if err != nil {
+			return fmt.Errorf("Not a number: %v", mod[1])
+		}
+		m.Priority = int(value)
+		if err := writeMementos(mementos); err != nil {
+			return err
+		}
+	case reMsg.MatchString(mod[0]):
+		m.Msg = mod[0]
+		if err := writeMementos(mementos); err != nil {
+			return err
+		}
+
+	default:
+		return fmt.Errorf("You are trying to modify invalid property: %s", mod[0])
+	}
+
+	return nil
+}
+
+// add a new memento to the stack
+func add() error {
+	var args []string = flag.Args()
+	if len(args) < 2 {
+		return errors.New("Please specify the message.")
+	}
+	// concat the remaining arguments as a message string
+	msg := strings.Join(args[1:], " ")
+	mementos, err := readMementos()
+	var lastId int
+	if len(mementos) < 1 {
+		lastId = 0
+	} else {
+		lastMemento := mementos[len(mementos)-1]
+		lastId = lastMemento.Id
+	}
+	m := Memento{
+		Id:       lastId + 1,
+		Msg:      msg,
+		Time:     time.Now().Unix(),
+		Priority: 1,
+	}
+	logger.Debugf("Writing %+v", m)
+	if err != nil {
+		return err
+	}
+	mementos = append(mementos, &m)
 	err = writeMementos(mementos)
 	return err
 }
 
 // remove a memento from the stack
-func rm() (err error) {
-	var (
-		mementos []Memento
-		args     []string = flag.Args()
-	)
-	if len(args) < 2 {
-		return errors.New("Please specify memento number.")
-	}
-	n, err := strconv.ParseInt(args[1], 10, 0)
-	if err != nil || n < 0 {
-		return errors.New("Invalid memento number: " + args[1])
-	}
-
-	// read all mementos
-	mementos, err = readMementos()
+func remove() error {
+	id, err := parseId()
 	if err != nil {
 		return err
 	}
-	// remove the Nth memento
-	if n > int64(len(mementos)-1) {
-		return fmt.Errorf("Memento %d does not exist.", n)
+
+	// read all mementos
+	mementos, err := readMementos()
+	if err != nil {
+		return err
 	}
+	// do a binary search for the memento. It should be sorted in ascending order
+	n, ok := findMementoById(mementos, id)
+	if !ok {
+		return fmt.Errorf("Memento %d does not exist", id)
+	}
+	logger.Debugf("found memento at %d", n)
+
 	before := mementos[:n]
 	after := mementos[n+1:]
 	mementos = append(before, after...)
 	writeMementos(mementos)
-	return
+	return nil
 }
 
 // return parsed mementos from the passed file
-func readMementos() (mementos []Memento, err error) {
-	file, err := getFileReader()
+//func readMementos() ([]*Memento, error) {
+func readMementos() ([]*Memento, error) {
+	logger.Debugf("opening %s", *dataFile)
+	r, err := os.Open(*dataFile)
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(file)
-	err = dec.Decode(&mementos)
-	if err != nil && err != io.EOF {
+	dec := json.NewDecoder(r)
+	var mementos []*Memento
+	if err := dec.Decode(&mementos); err != nil && err != io.EOF {
 		return nil, err
 	}
 	return mementos, nil
 }
 
 // write mementos into the file as a JSON string
-func writeMementos(mementos []Memento) (err error) {
+func writeMementos(mementos []*Memento) (err error) {
 	var file *os.File
 	// truncate the file
 	file, err = createFile()
@@ -251,10 +339,10 @@ func writeMementos(mementos []Memento) (err error) {
 	return
 }
 
-// create empty file or truncates an existing file
+// creates an empty file or truncates an existing file
 func createFile() (file *os.File, err error) {
 	// create directory if necessary
-	dir := filepath.Dir(dataFile)
+	dir := filepath.Dir(*dataFile)
 	if _, err = os.Stat(dir); err != nil {
 		fmt.Printf("Creating directory %s\n", dir)
 		err = os.MkdirAll(dir, os.ModeDir|0700)
@@ -262,23 +350,37 @@ func createFile() (file *os.File, err error) {
 			return nil, fmt.Errorf("Failed to create directory for the data file at %s.\n%s", dir, err)
 		}
 	}
-	file, err = os.Create(dataFile)
+	file, err = os.Create(*dataFile)
 	if err != nil {
 		return nil, err
 	}
 	return file, nil
 }
 
-// get file handle for reading mementos
-func getFileReader() (r *os.File, err error) {
-	var ok bool
-	if r, ok = handles["read"]; ok {
-		return r, nil
+// returns index at which the specified memento is. The
+// second result is false if the memento is not found.
+func findMementoById(mementos []*Memento, id int) (int, bool) {
+	count := len(mementos)
+	n := sort.Search(count, func(i int) bool {
+		return mementos[i].Id >= id
+	})
+	if n < count && mementos[n].Id == id {
+		return n, true
 	}
-	r, err = os.Open(dataFile)
-	if err == nil {
-		handles["read"] = r
-		return r, nil
+	// not found
+	return 0, false
+}
+
+// parses arguments, retrieves an ID
+func parseId() (int, error) {
+	var args []string = flag.Args()
+	if len(args) < 2 {
+		return 0, errors.New("Missing memento Id in arguments")
 	}
-	return nil, err
+	id, err := strconv.ParseInt(args[1], 10, 0)
+	if err != nil || id < 0 {
+		return 0, fmt.Errorf("Invalid memento Id: %v", args[1])
+	}
+	return int(id), nil
+
 }
