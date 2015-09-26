@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,7 +36,7 @@ type Memento struct {
 	Id       int
 	Msg      string
 	Time     int64
-	Priority int8
+	Priority int
 }
 
 const (
@@ -85,7 +86,6 @@ func init() {
 	logger.Formatter = formatter
 
 	// create the mementos file if it does not exist
-	// TODO presunut do createorappend
 	if _, err := os.Stat(*dataFile); err != nil {
 		if os.IsNotExist(err) {
 			_, err = createFile()
@@ -117,7 +117,9 @@ func main() {
 	case "fetch":
 		fetch()
 	case "rm", "del":
-		err = rm()
+		err = remove()
+	case "modify", "mod":
+		err = modify()
 	case "list", "ls":
 		err = list()
 	case "version":
@@ -141,9 +143,10 @@ func help() {
 Usage: mementor [OPTIONS...] ACTION [arguments...]
 
 ACTIONS
-	add			Add new memento.
+	add		Add new memento.
 	fetch		Display a random memento.
-	rm			Remove a memento.
+	modify		Modify an existing memento.
+	rm		Remove a memento.
 	help		Display this help.
 	list		List all mementos.
 	version		Display the current version.
@@ -155,18 +158,19 @@ OPTIONS
 }
 
 // list all mementos
+// TODO color lines according to their priority
 func list() error {
 	mementos, err := readMementos()
 	if err != nil {
 		return err
 	}
 
-	pr.underscore(" ID   Age          Description")
+	pr.underscore(" ID   Age         Pri  Description")
 	cfg := timeago.NoMax(timeago.English)
 	cfg.PastSuffix = ""
 	for _, m := range mementos {
 		t := time.Unix(m.Time, 0)
-		fmt.Printf("%3d   %10s   %s\n", m.Id, cfg.Format(t), m.Msg)
+		fmt.Printf("%3d   %10s  %3d  %s\n", m.Id, cfg.Format(t), m.Priority, m.Msg)
 	}
 
 	pr.info("\n%d mementos total.\n", len(mementos))
@@ -174,6 +178,7 @@ func list() error {
 }
 
 // print a single random memento message
+// TODO higher priority items should be fetched more often
 func fetch() (err error) {
 	var n int
 	mementos, err := readMementos()
@@ -190,10 +195,61 @@ func fetch() (err error) {
 	return
 }
 
-// TODO modify
+// modifies an existing memento
+// Example:
+// mementor mod 123 priority:3
+func modify() error {
+	var args []string = flag.Args()
+	if len(args) < 3 {
+		return errors.New("Not enough arguments")
+	}
+	id, err := parseId()
+	if err != nil {
+		return err
+	}
+	// read all mementos
+	mementos, err := readMementos()
+	if err != nil {
+		return err
+	}
+	n, ok := findMementoById(mementos, id)
+	if !ok {
+		return fmt.Errorf("Memento %d does not exist", id)
+	}
+	logger.Debugf("found memento at %d", n)
+	m := mementos[n]
+	mod := strings.Split(args[2], ":")
+	if len(mod) < 2 {
+		return fmt.Errorf("Your modification must be in the form of property:value")
+	}
+
+	rePriority := regexp.MustCompile("^pri.*")
+	reMsg := regexp.MustCompile("^m.*")
+	switch {
+	case rePriority.MatchString(mod[0]):
+		value, err := strconv.ParseInt(mod[1], 10, 0)
+		if err != nil {
+			return fmt.Errorf("Not a number: %v", mod[1])
+		}
+		m.Priority = int(value)
+		if err := writeMementos(mementos); err != nil {
+			return err
+		}
+	case reMsg.MatchString(mod[0]):
+		m.Msg = mod[0]
+		if err := writeMementos(mementos); err != nil {
+			return err
+		}
+
+	default:
+		return fmt.Errorf("You are trying to modify invalid property: %s", mod[0])
+	}
+
+	return nil
+}
 
 // add a new memento to the stack
-func add() (err error) {
+func add() error {
 	var args []string = flag.Args()
 	if len(args) < 2 {
 		return errors.New("Please specify the message.")
@@ -224,18 +280,11 @@ func add() (err error) {
 }
 
 // remove a memento from the stack
-func rm() error {
-	var (
-		args []string = flag.Args()
-	)
-	if len(args) < 2 {
-		return errors.New("Please specify a memento ID.")
+func remove() error {
+	id, err := parseId()
+	if err != nil {
+		return err
 	}
-	id64, err := strconv.ParseInt(args[1], 10, 0)
-	if err != nil || id64 < 0 {
-		return fmt.Errorf("Invalid memento Id: %v", args[1])
-	}
-	id := int(id64)
 
 	// read all mementos
 	mementos, err := readMementos()
@@ -243,16 +292,11 @@ func rm() error {
 		return err
 	}
 	// do a binary search for the memento. It should be sorted in ascending order
-	count := len(mementos)
-	n := sort.Search(count, func(i int) bool {
-		return mementos[i].Id >= id
-	})
-	if n < count && mementos[n].Id == id {
-		pr.info("found memento at %d", n)
-	} else {
-		// not found
+	n, ok := findMementoById(mementos, id)
+	if !ok {
 		return fmt.Errorf("Memento %d does not exist", id)
 	}
+	logger.Debugf("found memento at %d", n)
 
 	before := mementos[:n]
 	after := mementos[n+1:]
@@ -295,7 +339,7 @@ func writeMementos(mementos []*Memento) (err error) {
 	return
 }
 
-// create empty file or truncates an existing file
+// creates an empty file or truncates an existing file
 func createFile() (file *os.File, err error) {
 	// create directory if necessary
 	dir := filepath.Dir(*dataFile)
@@ -311,4 +355,32 @@ func createFile() (file *os.File, err error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+// returns index at which the specified memento is. The
+// second result is false if the memento is not found.
+func findMementoById(mementos []*Memento, id int) (int, bool) {
+	count := len(mementos)
+	n := sort.Search(count, func(i int) bool {
+		return mementos[i].Id >= id
+	})
+	if n < count && mementos[n].Id == id {
+		return n, true
+	}
+	// not found
+	return 0, false
+}
+
+// parses arguments, retrieves an ID
+func parseId() (int, error) {
+	var args []string = flag.Args()
+	if len(args) < 2 {
+		return 0, errors.New("Missing memento Id in arguments")
+	}
+	id, err := strconv.ParseInt(args[1], 10, 0)
+	if err != nil || id < 0 {
+		return 0, fmt.Errorf("Invalid memento Id: %v", args[1])
+	}
+	return int(id), nil
+
 }
